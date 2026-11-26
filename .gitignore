@@ -1,0 +1,77 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+
+# Testing, linting & type checking caches
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# IDE, Agent & OS files
+.vscode/
+.idea/
+.agents/
+.claude/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+*.log
+
+# Vector Database (pertahankan .gitkeep)
+vector_db/*
+!vector_db/.gitkeep
+
+# Data lokal (abaikan isi folder data/ kecuali .gitkeep)
+data/*
+!data/.gitkeep
+!data/modul_ajar/
+!data/lembar_jawaban/
+!data/hasil_penilaian/
+data/modul_ajar/*
+!data/modul_ajar/.gitkeep
+data/lembar_jawaban/*
+!data/lembar_jawaban/.gitkeep
+data/hasil_penilaian/*
+!data/hasil_penilaian/.gitkeep

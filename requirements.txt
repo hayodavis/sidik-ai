@@ -1,0 +1,10 @@
+google-genai
+chromadb
+pypdf
+streamlit
+pillow
+pandas
+openpyxl
+pydantic
+python-dotenv
+httpx
