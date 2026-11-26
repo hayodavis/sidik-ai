@@ -23,6 +23,7 @@ import streamlit as st
 from dotenv import load_dotenv
 from google import genai
 
+from src.demo_data import buat_paket_demo_tkj
 from src.grader_engine import (
     DAFTAR_PROVIDER,
     MODEL_GROQ_UTAMA,
@@ -104,9 +105,46 @@ KOLOM_EKSPOR_EXCEL = [
 # Helper State, Multi-Soal & Rekap Data
 # ---------------------------------------------------------------------------
 def _baca_env_bersih(nama_var: str) -> str:
-    """Membaca variabel lingkungan dari .env dan mengabaikan placeholder bawaan."""
+    """Membaca variabel lingkungan dari .env atau st.secrets (Streamlit Cloud) secara aman."""
     nilai = os.getenv(nama_var, "").strip()
+    if not nilai:
+        try:
+            nilai = str(st.secrets.get(nama_var, "")).strip()
+        except Exception:
+            nilai = ""
     return "" if nilai == API_KEY_PLACEHOLDER else nilai
+
+
+def _muat_mode_demo_tkj() -> None:
+    """Memuat paket simulasi SMK TKJ (Subnetting IPv4) agar juri dapat mencoba aplikasi 1 klik tanpa API Key."""
+    paket = buat_paket_demo_tkj()
+
+    # Hapus widget soal lama agar tidak menyisakan kunci usang
+    for uid_lama in list(st.session_state.get("daftar_soal_ids", [])):
+        st.session_state.pop(f"soal_pertanyaan_{uid_lama}", None)
+        st.session_state.pop(f"soal_rubrik_{uid_lama}", None)
+        st.session_state.pop(f"soal_bobot_{uid_lama}", None)
+
+    daftar_soal = paket["daftar_soal"]
+    ids_baru: list[int] = []
+    for idx, item in enumerate(daftar_soal, start=1):
+        ids_baru.append(idx)
+        st.session_state[f"soal_pertanyaan_{idx}"] = item["pertanyaan"]
+        st.session_state[f"soal_rubrik_{idx}"] = item["rubrik"]
+        st.session_state[f"soal_bobot_{idx}"] = int(item["bobot"])
+
+    st.session_state["daftar_soal_ids"] = ids_baru
+    st.session_state["next_soal_uid"] = len(ids_baru) + 1
+    st.session_state["daftar_soal_terakhir"] = daftar_soal
+    st.session_state["nama_ujian_input"] = paket["nama_ujian"]
+    st.session_state["gambar_siswa"] = paket["gambar_siswa"]
+    st.session_state["hasil_koreksi"] = paket["hasil_koreksi"]
+    st.session_state["editor_version"] = int(st.session_state.get("editor_version", 0)) + 1
+    st.session_state["pesan_notifikasi_validasi"] = (
+        "Mode Demo SMK TKJ (Materi Subnetting IPv4 — 2 Soal, 3 Siswa) berhasil dimuat! "
+        "Anda dapat mengedit skor di tabel, memilih siswa untuk melihat foto vs LaTeX, "
+        "dan mengunduh rekap Excel tanpa memerlukan API Key."
+    )
 
 
 def _inisialisasi_session_state() -> None:
@@ -129,6 +167,7 @@ def _inisialisasi_session_state() -> None:
         "ollama_base_url_input": env_ollama,
         "ollama_models_detected": [],
         "groq_models_detected": [],
+        "nama_ujian_input": "UH1_Fisika_Hukum_Newton",
         "hasil_koreksi": [],
         "gambar_siswa": {},
         "cache_gambar_upload": {},
@@ -537,7 +576,6 @@ with st.sidebar:
 
     nama_ujian = st.text_input(
         "Nama Ujian / Mata Pelajaran",
-        value="UH1_Fisika_Hukum_Newton",
         key="nama_ujian_input",
         help="Digunakan sebagai label nama file saat mengekspor rekap Excel.",
     )
@@ -574,6 +612,17 @@ with st.sidebar:
         key="abaikan_cache_checkbox",
         help="Jika dicentang, aplikasi tidak membaca hasil cache lokal dan akan memanggil model AI ulang.",
     )
+
+    st.divider()
+    st.caption("Ingin langsung mencoba tanpa API Key?")
+    if st.button(
+        "🎯 Muat Mode Demo TKJ",
+        key="btn_muat_demo_sidebar",
+        width="stretch",
+        on_click=_muat_mode_demo_tkj,
+        help="Memuat contoh 2 soal Subnetting IPv4 + 3 lembar jawaban siswa TKJ untuk dicoba langsung di Tab 2 & Tab 3.",
+    ):
+        st.toast("Mode Demo TKJ dimuat! Buka tab '✅ Validasi Guru & Rekap Nilai'.", icon="🎯")
 
 
 # ---------------------------------------------------------------------------
@@ -977,8 +1026,15 @@ with tab_validasi:
     if not hasil_koreksi:
         st.info(
             "Belum ada hasil koreksi yang tersedia. Silakan unggah lembar jawaban siswa "
-            "dan jalankan proses koreksi otomatis pada tab **📝 Koreksi Lembar Jawaban** terlebih dahulu.",
+            "dan jalankan proses koreksi otomatis pada tab **📝 Koreksi Lembar Jawaban** terlebih dahulu, "
+            "atau klik tombol di bawah untuk langsung mencoba contoh hasil koreksi **SMK TKJ (Subnetting IPv4)** tanpa API Key.",
             title="Belum ada data penilaian",
+        )
+        st.button(
+            "🎯 Muat Contoh Demo SMK TKJ (Tanpa API Key)",
+            type="primary",
+            key="btn_muat_demo_tab3",
+            on_click=_muat_mode_demo_tkj,
         )
     else:
         notifikasi_val = st.session_state.pop("pesan_notifikasi_validasi", None)
@@ -1130,20 +1186,20 @@ with tab_validasi:
                 )
 
             c_s1, c_s2, c_s3, c_s4 = st.columns(4)
-            c_s1.metric("Konsep", f"{data_siswa['skor_konsep']}/40", border=True, height="stretch")
+            c_s1.metric("Konsep (/40)", str(data_siswa["skor_konsep"]), border=True, height="stretch")
             c_s2.metric(
-                "Langkah",
-                f"{data_siswa['skor_langkah_perhitungan']}/40",
+                "Langkah (/40)",
+                str(data_siswa["skor_langkah_perhitungan"]),
                 border=True,
                 height="stretch",
             )
             c_s3.metric(
-                "Hasil & Satuan",
-                f"{data_siswa['skor_hasil_dan_satuan']}/20",
+                "Hasil (/20)",
+                str(data_siswa["skor_hasil_dan_satuan"]),
                 border=True,
                 height="stretch",
             )
-            c_s4.metric("Total", f"{data_siswa['total_nilai']}/100", border=True, height="stretch")
+            c_s4.metric("Total (/100)", str(data_siswa["total_nilai"]), border=True, height="stretch")
 
             sumber_badge = "Cache lokal" if data_siswa.get("dari_cache") else "API langsung"
             prov_label = str(data_siswa.get("provider_digunakan", "-")).upper()

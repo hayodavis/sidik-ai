@@ -4,6 +4,7 @@
 ![Streamlit](https://img.shields.io/badge/Streamlit-Local%20Web%20App-FF4B4B?logo=streamlit&logoColor=white)
 ![ChromaDB](https://img.shields.io/badge/ChromaDB-Local%20RAG-2E7D32)
 ![Multi-Provider AI](https://img.shields.io/badge/Vision%20AI-Groq%20%7C%20OpenRouter%20%7C%20Ollama%20%7C%20Gemini-6A1B9A)
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-sidik--ai.streamlit.app-1F4E78?logo=streamlit&logoColor=white)](https://sidik-ai.streamlit.app)
 
 **SIDIK-AI** (*Sistem Digitalisasi & Koreksi Esai Berbasis AI*) adalah aplikasi web lokal (*Local Web App*) berbasis Python & Streamlit yang dirancang khusus untuk membantu guru mengoreksi **lembar jawaban tulisan tangan mata pelajaran eksakta** (Matematika, Fisika, Kimia, dan Teknologi/Informatika) secara cepat, adil, dan terstruktur menggunakan arsitektur **Multimodal RAG (Retrieval-Augmented Generation)**.
 
@@ -51,6 +52,11 @@ Tambah beberapa nomor soal secara dinamis dengan tata letak 2 kolom berdampingan
 Ganti provider AI kapan saja langsung dari sidebar (Groq, OpenRouter, Ollama Lokal, atau Google Gemini) dan tinjau rekap nilai, inspeksi LaTeX, serta ekspor Excel pada Tab Validasi Guru.
 
 ![Tab 3 Validasi Guru dan Multi-Provider Vision](docs/screenshots/03_multiprovider_dan_validasi.png)
+
+### 4. Inspeksi Detail & Mode Demo 1-Klik SMK TKJ (Tanpa API Key)
+Klik tombol **🎯 Muat Mode Demo TKJ** di sidebar atau Tab 3 untuk langsung mencoba inspeksi foto tulisan tangan *Subnetting IPv4* berdampingan dengan peringatan **Perlu Validasi Guru**, rincian skor per nomor soal, transkripsi LaTeX, dan ekspor Excel tanpa perlu memasukkan API Key.
+
+![Mode Demo SMK TKJ Tab 3 Validasi Guru](docs/screenshots/04_demo_validasi_tkj.png)
 
 ---
 
