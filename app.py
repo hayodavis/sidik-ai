@@ -115,6 +115,24 @@ def _baca_env_bersih(nama_var: str) -> str:
     return "" if nilai == API_KEY_PLACEHOLDER else nilai
 
 
+def _ambil_api_key_efektif(nama_env: str, input_pengguna: str) -> tuple[str, bool]:
+    """Mengembalikan (api_key_efektif, berasal_dari_server).
+
+    API Key dari .env / st.secrets hanya dipakai di sisi server (backend) dan TIDAK
+    pernah diisikan ke widget input browser, sehingga tidak dapat diintip lewat ikon mata.
+    Pengguna tetap dapat mengetik API Key sendiri di sidebar untuk menggantinya di sesi aktif.
+    """
+    input_bersih = (input_pengguna or "").strip()
+    if _api_key_valid(input_bersih):
+        return input_bersih, False
+
+    server_key = _baca_env_bersih(nama_env)
+    if _api_key_valid(server_key):
+        return server_key, True
+
+    return "", False
+
+
 def _muat_mode_demo_tkj() -> None:
     """Memuat paket simulasi SMK TKJ (Subnetting IPv4) agar juri dapat mencoba aplikasi 1 klik tanpa API Key."""
     paket = buat_paket_demo_tkj()
@@ -151,7 +169,6 @@ def _inisialisasi_session_state() -> None:
     """Inisialisasi seluruh kunci st.session_state di satu tempat yang terpusat."""
     env_groq = _baca_env_bersih("GROQ_API_KEY")
     env_openrouter = _baca_env_bersih("OPENROUTER_API_KEY")
-    env_gemini = _baca_env_bersih("GEMINI_API_KEY")
     env_ollama = os.getenv("OLLAMA_BASE_URL", OLLAMA_DEFAULT_BASE_URL).strip() or OLLAMA_DEFAULT_BASE_URL
 
     # Prioritaskan Groq sebagai default agar guru langsung melihat opsi gratis tercepat
@@ -161,9 +178,10 @@ def _inisialisasi_session_state() -> None:
 
     defaults: dict[str, Any] = {
         "provider_ai_select": provider_default,
-        "groq_api_key_input": env_groq,
-        "openrouter_api_key_input": env_openrouter,
-        "gemini_api_key_input": env_gemini,
+        # Sengaja dikosongkan agar API Key dari .env / st.secrets tidak pernah terekspos di UI browser
+        "groq_api_key_input": "",
+        "openrouter_api_key_input": "",
+        "gemini_api_key_input": "",
         "ollama_base_url_input": env_ollama,
         "ollama_models_detected": [],
         "groq_models_detected": [],
@@ -413,13 +431,19 @@ with st.sidebar:
     mode_kecepatan = "cepat"
 
     if provider_aktif == "groq":
-        api_key_aktif = st.text_input(
-            "GROQ_API_KEY",
+        server_groq_ada = _api_key_valid(_baca_env_bersih("GROQ_API_KEY"))
+        input_groq = st.text_input(
+            "GROQ_API_KEY" + (" (Opsional — key server aktif)" if server_groq_ada else ""),
             type="password",
             key="groq_api_key_input",
-            placeholder="Tempel Groq API Key (gsk_...) di sini...",
-            help="Otomatis membaca GROQ_API_KEY dari .env jika tersedia.",
+            placeholder=(
+                "Tersambung aman ke Secrets server (isi jika ingin pakai key sendiri)"
+                if server_groq_ada
+                else "Tempel Groq API Key (gsk_...) di sini..."
+            ),
+            help="API Key dari .env / Streamlit Secrets berjalan aman di backend tanpa ditampilkan di browser.",
         )
+        api_key_aktif, pakai_key_server = _ambil_api_key_efektif("GROQ_API_KEY", input_groq)
         st.caption(
             "Buat API Key **gratis & cepat** di "
             "[Groq Console](https://console.groq.com/keys)."
@@ -460,19 +484,27 @@ with st.sidebar:
         else:
             model_aktif = pilihan_groq
 
-        if _api_key_valid(api_key_aktif):
-            st.caption(":green-badge[Groq API Key siap digunakan]")
+        if pakai_key_server:
+            st.caption(":green-badge[Terhubung ke API Key server (aman & siap pakai)]")
+        elif _api_key_valid(api_key_aktif):
+            st.caption(":green-badge[Groq API Key kustom siap digunakan]")
         else:
             st.caption(":orange-badge[GROQ_API_KEY belum diisi]")
 
     elif provider_aktif == "openrouter":
-        api_key_aktif = st.text_input(
-            "OPENROUTER_API_KEY",
+        server_or_ada = _api_key_valid(_baca_env_bersih("OPENROUTER_API_KEY"))
+        input_or = st.text_input(
+            "OPENROUTER_API_KEY" + (" (Opsional — key server aktif)" if server_or_ada else ""),
             type="password",
             key="openrouter_api_key_input",
-            placeholder="Tempel OpenRouter API Key (sk-or-...) di sini...",
-            help="Otomatis membaca OPENROUTER_API_KEY dari .env jika tersedia.",
+            placeholder=(
+                "Tersambung aman ke Secrets server (isi jika ingin pakai key sendiri)"
+                if server_or_ada
+                else "Tempel OpenRouter API Key (sk-or-...) di sini..."
+            ),
+            help="API Key dari .env / Streamlit Secrets berjalan aman di backend tanpa ditampilkan di browser.",
         )
+        api_key_aktif, pakai_key_server = _ambil_api_key_efektif("OPENROUTER_API_KEY", input_or)
         st.caption(
             "Buat API Key (tersedia model `:free`) di "
             "[OpenRouter Keys](https://openrouter.ai/keys)."
@@ -493,8 +525,10 @@ with st.sidebar:
         else:
             model_aktif = pilihan_terselect
 
-        if _api_key_valid(api_key_aktif):
-            st.caption(":green-badge[OpenRouter API Key siap digunakan]")
+        if pakai_key_server:
+            st.caption(":green-badge[Terhubung ke API Key server (aman & siap pakai)]")
+        elif _api_key_valid(api_key_aktif):
+            st.caption(":green-badge[OpenRouter API Key kustom siap digunakan]")
         else:
             st.caption(":orange-badge[OPENROUTER_API_KEY belum diisi]")
 
@@ -543,13 +577,19 @@ with st.sidebar:
         st.caption("Unduh model vision lokal: `ollama pull qwen2.5vl:7b` atau `ollama pull gemma3:4b`.")
 
     else:  # gemini
-        api_key_aktif = st.text_input(
-            "GEMINI_API_KEY",
+        server_gemini_ada = _api_key_valid(_baca_env_bersih("GEMINI_API_KEY"))
+        input_gemini = st.text_input(
+            "GEMINI_API_KEY" + (" (Opsional — key server aktif)" if server_gemini_ada else ""),
             type="password",
             key="gemini_api_key_input",
-            placeholder="Tempel API Key Gemini Anda di sini...",
-            help="Otomatis membaca GEMINI_API_KEY dari file .env jika tersedia.",
+            placeholder=(
+                "Tersambung aman ke Secrets server (isi jika ingin pakai key sendiri)"
+                if server_gemini_ada
+                else "Tempel API Key Gemini Anda di sini..."
+            ),
+            help="API Key dari .env / Streamlit Secrets berjalan aman di backend tanpa ditampilkan di browser.",
         )
+        api_key_aktif, pakai_key_server = _ambil_api_key_efektif("GEMINI_API_KEY", input_gemini)
         st.caption(
             "Buat API Key Free Tier di "
             "[Google AI Studio](https://aistudio.google.com/apikey)."
@@ -567,8 +607,10 @@ with st.sidebar:
             )
             or "cepat"
         )
-        if _api_key_valid(api_key_aktif):
-            st.caption(":green-badge[Gemini API Key siap digunakan]")
+        if pakai_key_server:
+            st.caption(":green-badge[Terhubung ke API Key server (aman & siap pakai)]")
+        elif _api_key_valid(api_key_aktif):
+            st.caption(":green-badge[Gemini API Key kustom siap digunakan]")
         else:
             st.caption(":orange-badge[GEMINI_API_KEY belum diisi]")
 
@@ -1306,7 +1348,10 @@ with tab_validasi:
                 width="stretch",
                 disabled=gambar_aktif is None,
             ):
-                gemini_key = st.session_state.get("gemini_api_key_input", "")
+                gemini_key, _ = _ambil_api_key_efektif(
+                    "GEMINI_API_KEY",
+                    st.session_state.get("gemini_api_key_input", ""),
+                )
                 if not _api_key_valid(gemini_key):
                     st.error(
                         "Masukkan `GEMINI_API_KEY` (Paid Tier) di sidebar (pilih Provider Google Gemini) atau di `.env`.",
