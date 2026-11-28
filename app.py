@@ -9,6 +9,8 @@ dan mengekspor rekap nilai ke Excel (.xlsx).
 
 from __future__ import annotations
 
+import base64
+import io
 import os
 import re
 import time
@@ -22,8 +24,11 @@ import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 from google import genai
+from PIL import Image
 
+from src.camera_scanner_ui import kamera_dokumen_langsung
 from src.demo_data import buat_paket_demo_tkj
+from src.doc_scanner import LABEL_MODE_SCAN, pindai_dan_tingkatkan_dokumen
 from src.grader_engine import (
     DAFTAR_PROVIDER,
     MODEL_GROQ_UTAMA,
@@ -42,8 +47,9 @@ load_dotenv(override=False)
 
 st.set_page_config(
     page_title="SIDIK-AI | Koreksi Esai Otomatis",
-    page_icon="📝",
+    page_icon=":material/document_scanner:",
     layout="wide",
+    initial_sidebar_state="auto",
 )
 
 MODUL_AJAR_DIR = Path("./data/modul_ajar")
@@ -206,6 +212,13 @@ def _inisialisasi_session_state() -> None:
         ],
         "editor_version": 0,
         "pesan_notifikasi_validasi": None,
+        "antrean_scan": [],
+        "last_capture_ts": 0,
+        "scan_terpilih_idx": 0,
+        "scan_auto_crop_toggle": True,
+        "galeri_mode_scan": "asli",
+        "galeri_auto_crop": False,
+        "sumber_foto_mode": "kamera",
     }
     for kunci, nilai in defaults.items():
         if kunci not in st.session_state:
@@ -260,13 +273,70 @@ def _kumpulkan_daftar_soal_aktif() -> list[dict[str, Any]]:
     return daftar
 
 
-def _muat_gambar_tercache(uploaded_file: Any) -> Any:
-    """Memuat & mengompresi gambar dengan cache sesi agar tidak diproses ulang tiap rerun."""
-    kunci = (uploaded_file.name, uploaded_file.size)
-    cache_map: dict[tuple[str, int], Any] = st.session_state["cache_gambar_upload"]
+def _muat_gambar_tercache(
+    uploaded_file: Any,
+    *,
+    mode_scan: str = "asli",
+    auto_crop: bool = False,
+) -> Any:
+    """Memuat, mengompresi, dan (opsional) meningkatkan kualitas scan gambar dengan cache sesi."""
+    kunci = (uploaded_file.name, uploaded_file.size, mode_scan, bool(auto_crop))
+    cache_map: dict[tuple[Any, ...], Any] = st.session_state["cache_gambar_upload"]
     if kunci not in cache_map:
-        cache_map[kunci] = kompres_dan_muat_gambar(uploaded_file, max_width=1024)
+        img_dasar = kompres_dan_muat_gambar(uploaded_file, max_width=1400 if mode_scan != "asli" or auto_crop else 1024)
+        if mode_scan != "asli" or auto_crop:
+            hasil = pindai_dan_tingkatkan_dokumen(
+                img_dasar,
+                mode=mode_scan,  # type: ignore[arg-type]
+                auto_crop=auto_crop,
+                max_width=1280,
+            )
+            cache_map[kunci] = hasil.gambar
+        else:
+            cache_map[kunci] = img_dasar
     return cache_map[kunci]
+
+
+def _dekode_data_url_ke_bytes(data_url: str) -> bytes:
+    """Mengubah data URL base64 dari komponen kamera CCv2 menjadi bytes gambar mentah."""
+    if "," in data_url:
+        _, b64_part = data_url.split(",", 1)
+    else:
+        b64_part = data_url
+    return base64.b64decode(b64_part)
+
+
+def _proses_ulang_item_scan(item: dict[str, Any]) -> None:
+    """Memproses ulang 1 item pada antrean kamera saat mode filter/crop/rotasi diubah guru."""
+    with Image.open(io.BytesIO(item["raw_bytes"])) as dibuka:
+        dibuka.load()
+        img_raw = dibuka.copy()
+    hasil = pindai_dan_tingkatkan_dokumen(
+        img_raw,
+        mode=item.get("mode", "ditingkatkan"),
+        auto_crop=bool(item.get("auto_crop", True)),
+        rotasi_derajat=int(item.get("rotasi", 0)),
+        max_width=1280,
+    )
+    item["gambar_hasil"] = hasil.gambar
+    item["auto_cropped"] = hasil.auto_cropped
+
+
+def _hapus_item_scan(indeks: int) -> None:
+    """Menghapus satu lembar foto dari antrean kamera."""
+    antrean: list[dict[str, Any]] = st.session_state.get("antrean_scan", [])
+    if 0 <= indeks < len(antrean):
+        antrean.pop(indeks)
+        if antrean:
+            st.session_state["scan_terpilih_idx"] = min(indeks, len(antrean) - 1)
+        else:
+            st.session_state["scan_terpilih_idx"] = 0
+
+
+def _kosongkan_antrean_scan() -> None:
+    """Mengosongkan seluruh antrean foto hasil tangkapan kamera langsung."""
+    st.session_state["antrean_scan"] = []
+    st.session_state["scan_terpilih_idx"] = 0
 
 
 def _daftar_pdf_tersimpan() -> list[dict[str, Any]]:
@@ -406,8 +476,9 @@ def _nama_file_excel_unduhan(nama_ujian: str) -> str:
 # ---------------------------------------------------------------------------
 _inisialisasi_session_state()
 
-st.title("📝 SIDIK-AI")
+st.title("SIDIK-AI", anchor=False)
 st.caption("Sistem Digitalisasi & Koreksi Esai Eksakta Berbasis Multimodal RAG")
+slot_ribbon_status = st.container()
 
 
 # ---------------------------------------------------------------------------
@@ -658,23 +729,51 @@ with st.sidebar:
     st.divider()
     st.caption("Ingin langsung mencoba tanpa API Key?")
     if st.button(
-        "🎯 Muat Mode Demo TKJ",
+        "Muat Mode Demo TKJ",
+        icon=":material/school:",
         key="btn_muat_demo_sidebar",
         width="stretch",
         on_click=_muat_mode_demo_tkj,
-        help="Memuat contoh 2 soal Subnetting IPv4 + 3 lembar jawaban siswa TKJ untuk dicoba langsung di Tab 2 & Tab 3.",
+        help="Memuat contoh 2 soal Subnetting IPv4 + 3 lembar jawaban siswa TKJ untuk dicoba langsung di tab Koreksi & Hasil.",
     ):
-        st.toast("Mode Demo TKJ dimuat! Buka tab '✅ Validasi Guru & Rekap Nilai'.", icon="🎯")
+        st.toast("Mode Demo TKJ dimuat! Buka tab 'Hasil & Validasi'.", icon="🎯")
+
+
+# Ribbon Status Cepat di bagian atas (sangat membantu guru non-IT di perangkat mobile)
+with slot_ribbon_status:
+    siap_api = (not info_prov["butuh_api_key"]) or _api_key_valid(api_key_aktif)
+    badge_status_ai = (
+        f":green-badge[:material/check_circle: Siap · {provider_aktif.upper()} · {model_aktif}]"
+        if siap_api
+        else f":orange-badge[:material/key: {info_prov['env_var']} belum diisi]"
+    )
+    with st.container(horizontal=True, vertical_alignment="center"):
+        st.markdown(badge_status_ai)
+        if st.button(
+            "Mode Demo TKJ",
+            icon=":material/school:",
+            key="btn_muat_demo_topbar",
+            on_click=_muat_mode_demo_tkj,
+            help="Muat contoh nyata Subnetting TKJ (2 soal, 3 siswa) tanpa perlu API Key.",
+        ):
+            st.toast("Mode Demo TKJ dimuat! Buka tab 'Hasil & Validasi'.", icon="🎯")
+        with st.popover("Pengaturan", icon=":material/tune:"):
+            st.markdown(f"**Provider aktif:** `{provider_aktif.upper()}` (`{model_aktif}`)")
+            st.markdown(f"**Nama ujian:** `{nama_ujian}`")
+            st.caption(
+                "Di layar HP, ketuk ikon **`»`** di pojok kiri atas untuk membuka panel sidebar "
+                "dan mengganti Provider AI, API Key, Nama Ujian, atau jumlah lembar paralel."
+            )
 
 
 # ---------------------------------------------------------------------------
-# 3 Tab Utama Aplikasi
+# 3 Tab Utama Aplikasi (Label ringkas agar muat utuh di layar HP 360px+)
 # ---------------------------------------------------------------------------
 tab_rag, tab_koreksi, tab_validasi = st.tabs(
     [
-        "📚 Basis Pengetahuan (Modul RAG)",
-        "📝 Koreksi Lembar Jawaban",
-        "✅ Validasi Guru & Rekap Nilai",
+        ":material/menu_book: Modul RAG",
+        ":material/document_scanner: Koreksi & Scan",
+        ":material/fact_check: Hasil & Validasi",
     ]
 )
 
@@ -800,8 +899,8 @@ with tab_koreksi:
 
     for nomor_tampil, uid in enumerate(daftar_uid_soal, start=1):
         with st.container(border=True):
-            col_hdr, col_bobot, col_hapus = st.columns([3.5, 1.2, 0.8], vertical_alignment="bottom")
-            col_hdr.markdown(f"#### Soal Nomor {nomor_tampil}")
+            st.markdown(f"#### Soal Nomor {nomor_tampil}")
+            col_bobot, col_hapus = st.columns([1.5, 1.0], vertical_alignment="bottom", wrap=False)
             col_bobot.number_input(
                 "Bobot Poin",
                 min_value=1,
@@ -823,41 +922,272 @@ with tab_koreksi:
             with col_soal:
                 st.text_area(
                     f"Pertanyaan Soal No. {nomor_tampil}",
-                    height=160,
+                    height=140,
                     key=f"soal_pertanyaan_{uid}",
                     placeholder="Tulis pertanyaan soal esai eksakta lengkap beserta data angka dan satuan...",
                 )
             with col_rubrik:
                 st.text_area(
                     f"Rubrik Penilaian / Kunci Jawaban No. {nomor_tampil}",
-                    height=160,
+                    height=140,
                     key=f"soal_rubrik_{uid}",
                     placeholder="Tulis rumus kunci, langkah perhitungan, dan pembagian poin penilaian...",
                 )
 
+    # -----------------------------------------------------------------------
+    # Pengambilan Lembar Jawaban: Foto Langsung (Mode Dokumen) & Unggah File
+    # -----------------------------------------------------------------------
     with st.container(border=True):
+        st.subheader("Ambil atau unggah lembar jawaban siswa", icon=":material/document_scanner:")
+        sumber_foto = str(
+            st.segmented_control(
+                "Cara memasukkan lembar jawaban",
+                options=["kamera", "unggah"],
+                required=True,
+                key="sumber_foto_mode",
+                width="stretch",
+                format_func=lambda v: (
+                    ":material/photo_camera: Foto Langsung (Scanner)"
+                    if v == "kamera"
+                    else ":material/upload_file: Unggah Galeri / File"
+                ),
+            )
+            or "kamera"
+        )
+
+        antrean_scan: list[dict[str, Any]] = st.session_state["antrean_scan"]
+
+        if sumber_foto == "kamera":
+            auto_crop_kamera = st.toggle(
+                "Otomatis potong & luruskan tepi kertas (Auto-Crop Dokumen)",
+                key="scan_auto_crop_toggle",
+                help="Mendeteksi 4 sudut lembar jawaban dan meluruskannya seperti hasil scanner. Matikan jika foto sudah rapat memenuhi kertas.",
+            )
+
+            hasil_kamera = kamera_dokumen_langsung(
+                key="kamera_dokumen_sidik",
+                default_mode="ditingkatkan",
+                queue_count=len(antrean_scan),
+            )
+
+            data_tangkap = getattr(hasil_kamera, "captured", None)
+            if isinstance(data_tangkap, dict) and data_tangkap.get("dataUrl"):
+                ts_tangkap = int(data_tangkap.get("ts") or 0)
+                if ts_tangkap != int(st.session_state.get("last_capture_ts", 0)):
+                    st.session_state["last_capture_ts"] = ts_tangkap
+                    try:
+                        raw_bytes = _dekode_data_url_ke_bytes(str(data_tangkap["dataUrl"]))
+                        mode_tangkap = str(data_tangkap.get("mode") or "ditingkatkan")
+                        if mode_tangkap not in ("asli", "hp", "ditingkatkan"):
+                            mode_tangkap = "ditingkatkan"
+                        urutan_baru = len(antrean_scan) + 1
+                        nama_asli = Path(str(data_tangkap.get("filename") or "")).name
+                        nama_item = (
+                            nama_asli
+                            if nama_asli and not nama_asli.startswith("Scan_")
+                            else f"Scan_{urutan_baru:02d}.jpg"
+                        )
+                        item_baru: dict[str, Any] = {
+                            "id": f"scan_{ts_tangkap}",
+                            "nama_file": nama_item,
+                            "raw_bytes": raw_bytes,
+                            "mode": mode_tangkap,
+                            "auto_crop": bool(auto_crop_kamera),
+                            "rotasi": 0,
+                            "auto_cropped": False,
+                            "gambar_hasil": None,
+                        }
+                        _proses_ulang_item_scan(item_baru)
+                        antrean_scan.append(item_baru)
+                        st.session_state["scan_terpilih_idx"] = len(antrean_scan) - 1
+                        st.toast(
+                            f"{nama_item} berhasil dipindai ({LABEL_MODE_SCAN.get(mode_tangkap, mode_tangkap)})!",
+                            icon="📄",
+                        )
+                    except Exception as exc_cam:
+                        st.error(
+                            f"Gagal memproses foto dari kamera: {exc_cam}",
+                            title="Gagal memindai foto",
+                        )
+
+            # Panel peninjauan & penyesuaian cepat hasil scan terakhir / terpilih
+            if antrean_scan:
+                idx_aktif = min(int(st.session_state.get("scan_terpilih_idx", 0)), len(antrean_scan) - 1)
+                idx_aktif = max(0, idx_aktif)
+                st.session_state["scan_terpilih_idx"] = idx_aktif
+
+                if len(antrean_scan) > 1:
+                    idx_aktif = int(
+                        st.selectbox(
+                            "Tinjau & atur hasil pindaian",
+                            options=list(range(len(antrean_scan))),
+                            index=idx_aktif,
+                            key="pilih_item_scan_preview",
+                            format_func=lambda i: (
+                                f"{i + 1}. {antrean_scan[i]['nama_file']} "
+                                f"({LABEL_MODE_SCAN.get(antrean_scan[i]['mode'], antrean_scan[i]['mode'])})"
+                            ),
+                        )
+                    )
+                    st.session_state["scan_terpilih_idx"] = idx_aktif
+
+                item_aktif = antrean_scan[idx_aktif]
+                with st.container(border=True):
+                    status_crop = (
+                        ":green-badge[Tepi kertas diluruskan]"
+                        if item_aktif.get("auto_cropped")
+                        else ":gray-badge[Bingkai penuh]"
+                    )
+                    st.markdown(f"**Pratinjau Scan: `{item_aktif['nama_file']}`** {status_crop}")
+
+                    mode_baru = str(
+                        st.segmented_control(
+                            "Filter hasil scan",
+                            options=["asli", "hp", "ditingkatkan"],
+                            default=item_aktif["mode"],
+                            required=True,
+                            key=f"filter_scan_{item_aktif['id']}",
+                            width="stretch",
+                            format_func=lambda m: LABEL_MODE_SCAN.get(m, m),
+                        )
+                        or item_aktif["mode"]
+                    )
+                    if mode_baru != item_aktif["mode"]:
+                        item_aktif["mode"] = mode_baru
+                        _proses_ulang_item_scan(item_aktif)
+
+                    with st.container(horizontal=True, vertical_alignment="center"):
+                        crop_item_baru = st.checkbox(
+                            "Auto-Crop",
+                            value=bool(item_aktif.get("auto_crop", True)),
+                            key=f"crop_scan_{item_aktif['id']}",
+                        )
+                        if crop_item_baru != bool(item_aktif.get("auto_crop", True)):
+                            item_aktif["auto_crop"] = crop_item_baru
+                            _proses_ulang_item_scan(item_aktif)
+
+                        if st.button(
+                            "Putar 90°",
+                            icon=":material/rotate_right:",
+                            key=f"putar_scan_{item_aktif['id']}",
+                        ):
+                            item_aktif["rotasi"] = (int(item_aktif.get("rotasi", 0)) + 90) % 360
+                            _proses_ulang_item_scan(item_aktif)
+                            st.rerun()
+
+                        if st.button(
+                            "Hapus lembar",
+                            icon=":material/delete:",
+                            key=f"hapus_scan_{item_aktif['id']}",
+                        ):
+                            _hapus_item_scan(idx_aktif)
+                            st.rerun()
+
+                    bandingkan_asli = st.checkbox(
+                        "Bandingkan dengan foto mentah",
+                        value=False,
+                        key=f"banding_scan_{item_aktif['id']}",
+                    )
+                    if bandingkan_asli:
+                        c_raw, c_res = st.columns(2, gap="small")
+                        with c_raw:
+                            st.image(
+                                item_aktif["raw_bytes"],
+                                caption="Foto mentah kamera",
+                                alt=f"Foto mentah kamera {item_aktif['nama_file']}",
+                                width="stretch",
+                            )
+                        with c_res:
+                            st.image(
+                                item_aktif["gambar_hasil"],
+                                caption=f"Hasil {LABEL_MODE_SCAN.get(item_aktif['mode'], item_aktif['mode'])}",
+                                alt=f"Hasil pindaian dokumen {item_aktif['nama_file']}",
+                                width="stretch",
+                            )
+                    else:
+                        st.image(
+                            item_aktif["gambar_hasil"],
+                            caption=f"Hasil {LABEL_MODE_SCAN.get(item_aktif['mode'], item_aktif['mode'])} — siap dikoreksi AI",
+                            alt=f"Hasil pindaian dokumen {item_aktif['nama_file']}",
+                            width="stretch",
+                        )
+
+        # Unggah dari galeri / file tetap selalu dirender (atau di mode unggah) agar file tidak hilang saat berpindah pill
+        if sumber_foto == "unggah":
+            mode_galeri = str(
+                st.segmented_control(
+                    "Peningkatan scan untuk foto unggahan galeri",
+                    options=["asli", "hp", "ditingkatkan"],
+                    required=True,
+                    key="galeri_mode_scan",
+                    width="stretch",
+                    format_func=lambda m: (
+                        "Asli (Tanpa filter)"
+                        if m == "asli"
+                        else ("H&P (Scanner)" if m == "hp" else "Ditingkatkan (Putih bersih)")
+                    ),
+                )
+                or "asli"
+            )
+            auto_crop_galeri = st.checkbox(
+                "Auto-Crop & luruskan tepi kertas pada foto unggahan",
+                key="galeri_auto_crop",
+                help="Aktifkan jika foto dari galeri masih memperlihatkan banyak latar meja.",
+            )
+        else:
+            mode_galeri = str(st.session_state.get("galeri_mode_scan", "asli"))
+            auto_crop_galeri = bool(st.session_state.get("galeri_auto_crop", False))
+
         file_lembar_jawaban = st.file_uploader(
-            "Unggah Foto / Scan Lembar Jawaban Tulisan Tangan Siswa",
+            "Unggah Foto / Scan Lembar Jawaban dari Galeri atau Komputer"
+            if sumber_foto == "unggah"
+            else "Atau tambahkan foto tambahan dari galeri (opsional)",
             type=["jpg", "jpeg", "png"],
             accept_multiple_files=True,
             key="uploader_lembar_jawaban",
-            help="Dapat mengunggah banyak lembar sekaligus. Orientasi foto kamera HP akan otomatis diperbaiki dan dikompresi ringan.",
+            help="Dapat mengunggah banyak lembar sekaligus. Orientasi foto kamera HP otomatis diperbaiki.",
         )
 
-        if file_lembar_jawaban:
-            st.caption(f"Siap dikoreksi: **{len(file_lembar_jawaban)} lembar jawaban**.")
+        total_scan_cam = len(antrean_scan)
+        total_upload_file = len(file_lembar_jawaban) if file_lembar_jawaban else 0
+        total_gabungan = total_scan_cam + total_upload_file
+
+        if total_gabungan > 0:
+            with st.container(horizontal=True, vertical_alignment="center"):
+                st.caption(
+                    f"Siap dikoreksi: **{total_gabungan} lembar** "
+                    f"({total_scan_cam} hasil kamera, {total_upload_file} unggahan galeri)."
+                )
+                if total_scan_cam > 0:
+                    st.button(
+                        "Kosongkan Antrean Kamera",
+                        icon=":material/delete_sweep:",
+                        key="btn_kosongkan_scan",
+                        on_click=_kosongkan_antrean_scan,
+                    )
+
             exp_preview = st.expander(
-                "Pratinjau foto lembar jawaban yang diunggah",
+                f"Pratinjau semua lembar siap koreksi ({total_gabungan})",
                 expanded=False,
                 on_change="rerun",
                 key="exp_preview_foto",
             )
             if exp_preview.open:
                 with exp_preview:
-                    kolom_preview = st.columns(min(4, len(file_lembar_jawaban)))
-                    for idx_img, file_img in enumerate(file_lembar_jawaban):
-                        img_preview = _muat_gambar_tercache(file_img)
-                        with kolom_preview[idx_img % len(kolom_preview)]:
+                    with st.grid("auto", min_column_width=155, gap="small"):
+                        for item_s in antrean_scan:
+                            st.image(
+                                item_s["gambar_hasil"],
+                                caption=f"📷 {item_s['nama_file']}",
+                                alt=f"Pratinjau pindaian kamera {item_s['nama_file']}",
+                                width="stretch",
+                            )
+                        for file_img in file_lembar_jawaban or []:
+                            img_preview = _muat_gambar_tercache(
+                                file_img,
+                                mode_scan=mode_galeri,
+                                auto_crop=auto_crop_galeri,
+                            )
                             st.image(
                                 img_preview,
                                 caption=file_img.name,
@@ -866,20 +1196,24 @@ with tab_koreksi:
                             )
 
     if st.button(
-        "🚀 Mulai Koreksi Otomatis AI",
+        "Mulai Koreksi Otomatis AI",
+        icon=":material/rocket_launch:",
         type="primary",
         key="btn_mulai_koreksi",
         width="stretch",
     ):
         daftar_soal_aktif = _kumpulkan_daftar_soal_aktif()
         soal_kosong = [s["nomor"] for s in daftar_soal_aktif if not s["pertanyaan"]]
+        antrean_kamera_siap: list[dict[str, Any]] = list(st.session_state.get("antrean_scan", []))
+        daftar_upload_siap: list[Any] = list(file_lembar_jawaban or [])
+        total_lembar = len(antrean_kamera_siap) + len(daftar_upload_siap)
 
         if info_prov["butuh_api_key"] and not _api_key_valid(api_key_aktif):
             env_nama = info_prov["env_var"]
             link_key = info_prov["link_key"]
             st.error(
-                f"Silakan masukkan `{env_nama}` yang valid pada sidebar sebelah kiri "
-                f"(buat gratis di {link_key}) atau ganti ke **Ollama Lokal**.",
+                f"Silakan masukkan `{env_nama}` yang valid pada panel sidebar (ketuk `»` di pojok kiri atas jika di HP) "
+                f"— buat gratis di {link_key} atau ganti ke **Ollama Lokal**.",
                 title=f"{env_nama} belum tersedia",
             )
         elif soal_kosong:
@@ -889,15 +1223,14 @@ with tab_koreksi:
                 "Isi terlebih dahulu atau hapus kartu soal yang tidak dipakai.",
                 title="Ada soal yang belum diisi",
             )
-        elif not file_lembar_jawaban:
+        elif total_lembar == 0:
             st.warning(
-                "Unggah minimal satu foto atau scan lembar jawaban siswa terlebih dahulu.",
-                title="Belum ada lembar jawaban yang diunggah",
+                "Ambil minimal satu foto melalui **Foto Langsung (Scanner)** atau unggah foto lembar jawaban siswa terlebih dahulu.",
+                title="Belum ada lembar jawaban",
             )
         else:
             st.session_state["daftar_soal_terakhir"] = daftar_soal_aktif
             mulai_batch = time.perf_counter()
-            total_lembar = len(file_lembar_jawaban)
 
             hasil_terurut: dict[int, dict[str, Any]] = {}
             gambar_batch: dict[str, Any] = {}
@@ -908,19 +1241,35 @@ with tab_koreksi:
                 f"Mengoreksi {total_lembar} lembar dengan {provider_aktif.upper()} ({model_aktif})...",
                 expanded=True,
             ) as status_box:
-                # 1. Muat & kompresi seluruh gambar di thread utama (cache sesi)
+                # 1. Kumpulkan seluruh gambar dari antrean kamera langsung + unggahan galeri
                 tugas_lembar: list[tuple[int, str, str, Any]] = []
-                for idx, file_img in enumerate(file_lembar_jawaban):
-                    nomor = idx + 1
+                indeks_global = 0
+
+                for item_cam in antrean_kamera_siap:
+                    nomor = indeks_global + 1
+                    nama_cam = str(item_cam["nama_file"])
+                    id_lembar = f"{nomor}_{nama_cam}"
+                    img_siap = item_cam["gambar_hasil"]
+                    gambar_batch[id_lembar] = img_siap
+                    tugas_lembar.append((indeks_global, id_lembar, nama_cam, img_siap))
+                    indeks_global += 1
+
+                for file_img in daftar_upload_siap:
+                    nomor = indeks_global + 1
                     id_lembar = f"{nomor}_{file_img.name}"
                     try:
-                        img_siap = _muat_gambar_tercache(file_img)
+                        img_siap = _muat_gambar_tercache(
+                            file_img,
+                            mode_scan=mode_galeri,
+                            auto_crop=auto_crop_galeri,
+                        )
                         gambar_batch[id_lembar] = img_siap
-                        tugas_lembar.append((idx, id_lembar, file_img.name, img_siap))
+                        tugas_lembar.append((indeks_global, id_lembar, file_img.name, img_siap))
                     except Exception as exc_img:
                         pesan_err = f"{file_img.name}: gagal memuat gambar ({exc_img})"
                         daftar_error.append(pesan_err)
                         st.error(pesan_err)
+                    indeks_global += 1
 
                 # 2. Ambil konteks RAG 1x untuk seluruh batch & siapkan 1 shared client
                 st.write("Mengambil referensi modul ajar dari ChromaDB (1× untuk seluruh batch)...")
@@ -1053,27 +1402,28 @@ with tab_koreksi:
                 st.session_state["editor_version"] += 1
                 st.success(
                     f"**{len(hasil_batch)} lembar jawaban** selesai dikoreksi dalam "
-                    f"**{durasi_total:.1f} detik**. Buka tab **✅ Validasi Guru & Rekap Nilai** "
+                    f"**{durasi_total:.1f} detik**. Buka tab **Hasil & Validasi** "
                     "untuk meninjau rincian per soal, mengedit nilai, atau mengunduh Excel.",
                     title="Koreksi otomatis selesai",
                 )
 
 
 # ===========================================================================
-# TAB 3: VALIDASI GURU & REKAP NILAI
+# TAB 3: VALIDASI GURU & REKAP NILAI (RESPONSIF DESKTOP & MOBILE)
 # ===========================================================================
 with tab_validasi:
     hasil_koreksi: list[dict[str, Any]] = st.session_state.get("hasil_koreksi", [])
 
     if not hasil_koreksi:
         st.info(
-            "Belum ada hasil koreksi yang tersedia. Silakan unggah lembar jawaban siswa "
-            "dan jalankan proses koreksi otomatis pada tab **📝 Koreksi Lembar Jawaban** terlebih dahulu, "
+            "Belum ada hasil koreksi yang tersedia. Silakan foto atau unggah lembar jawaban siswa "
+            "dan jalankan proses koreksi otomatis pada tab **Koreksi & Scan** terlebih dahulu, "
             "atau klik tombol di bawah untuk langsung mencoba contoh hasil koreksi **SMK TKJ (Subnetting IPv4)** tanpa API Key.",
             title="Belum ada data penilaian",
         )
         st.button(
-            "🎯 Muat Contoh Demo SMK TKJ (Tanpa API Key)",
+            "Muat Contoh Demo SMK TKJ (Tanpa API Key)",
+            icon=":material/school:",
             type="primary",
             key="btn_muat_demo_tab3",
             on_click=_muat_mode_demo_tkj,
@@ -1088,8 +1438,7 @@ with tab_validasi:
 
         st.subheader("Tabel rekap nilai (dapat diedit manual)")
         st.caption(
-            "Guru dapat langsung mengubah nama, skor, status validasi, atau umpan balik "
-            "di tabel berikut lalu klik **Simpan Perubahan Tabel** untuk menyimpan ke sesi."
+            "Geser tabel ke kanan jika menggunakan HP, atau gunakan form **Edit Cepat** pada panel Inspeksi Detail di bawah."
         )
 
         editor_key = f"editor_rekap_nilai_v{st.session_state['editor_version']}"
@@ -1104,7 +1453,7 @@ with tab_validasi:
             alt="Tabel rekap nilai dan validasi guru hasil koreksi esai siswa",
             disabled=["nama_file", "model_digunakan", "dari_cache"],
             column_config={
-                "nama_siswa": st.column_config.TextColumn("Nama Siswa", pinned=True),
+                "nama_siswa": st.column_config.TextColumn("Nama Siswa", width="medium"),
                 "nama_file": st.column_config.TextColumn("File Lembar"),
                 "skor_konsep": st.column_config.NumberColumn(
                     "Konsep (0-40)", min_value=0, max_value=40, step=1
@@ -1113,12 +1462,12 @@ with tab_validasi:
                     "Langkah (0-40)", min_value=0, max_value=40, step=1
                 ),
                 "skor_hasil_dan_satuan": st.column_config.NumberColumn(
-                    "Hasil & Satuan (0-20)", min_value=0, max_value=20, step=1
+                    "Hasil (0-20)", min_value=0, max_value=20, step=1
                 ),
                 "total_nilai": st.column_config.NumberColumn(
-                    "Total Nilai", min_value=0, max_value=100, step=1
+                    "Total", min_value=0, max_value=100, step=1
                 ),
-                "perlu_validasi_guru": st.column_config.CheckboxColumn("Perlu Validasi"),
+                "perlu_validasi_guru": st.column_config.CheckboxColumn("Validasi"),
                 "alasan_validasi": st.column_config.TextColumn("Alasan Validasi"),
                 "umpan_balik_siswa": st.column_config.TextColumn("Umpan Balik Siswa", width="large"),
                 "model_digunakan": st.column_config.TextColumn("Model AI"),
@@ -1132,7 +1481,8 @@ with tab_validasi:
 
         with st.container(horizontal=True, vertical_alignment="center"):
             if st.button(
-                "💾 Simpan Perubahan Tabel",
+                "Simpan Perubahan Tabel",
+                icon=":material/save:",
                 key="btn_simpan_edit_tabel",
                 disabled=len(baris_diedit) == 0,
             ):
@@ -1145,7 +1495,7 @@ with tab_validasi:
             if baris_diedit:
                 st.caption(f"Terdapat perubahan belum disimpan pada {len(baris_diedit)} baris.")
 
-        # Isi 3 Metrik Ringkasan di bagian atas Tab 3
+        # Isi 3 Metrik Ringkasan responsif di bagian atas Tab 3
         total_siswa = len(hasil_sinkron)
         rata_rata_kelas = (
             sum(item["total_nilai"] for item in hasil_sinkron) / total_siswa
@@ -1157,32 +1507,32 @@ with tab_validasi:
         )
 
         with slot_metrik:
-            col_m1, col_m2, col_m3 = st.columns(3)
-            col_m1.metric(
-                "Total Siswa Dikoreksi",
-                f"{total_siswa} siswa",
-                border=True,
-                height="stretch",
-            )
-            col_m2.metric(
-                "Rata-rata Nilai Kelas",
-                f"{rata_rata_kelas:.1f}",
-                border=True,
-                height="stretch",
-            )
-            col_m3.metric(
-                "Perlu Validasi Guru",
-                f"{jumlah_perlu_validasi} lembar",
-                border=True,
-                height="stretch",
-            )
+            with st.grid("auto", min_column_width=155, gap="small"):
+                st.metric(
+                    "Total Siswa",
+                    f"{total_siswa} siswa",
+                    border=True,
+                    height="stretch",
+                )
+                st.metric(
+                    "Rata-rata Kelas",
+                    f"{rata_rata_kelas:.1f}",
+                    border=True,
+                    height="stretch",
+                )
+                st.metric(
+                    "Perlu Validasi",
+                    f"{jumlah_perlu_validasi} lembar",
+                    border=True,
+                    height="stretch",
+                )
 
         st.divider()
 
         # -------------------------------------------------------------------
         # Bagian Inspeksi Detail & Validasi Lembar
         # -------------------------------------------------------------------
-        st.subheader("🔍 Inspeksi Detail & Validasi Lembar")
+        st.subheader("Inspeksi detail & validasi lembar", icon=":material/manage_search:")
 
         indeks_terpilih = st.selectbox(
             "Pilih siswa yang ingin diperiksa secara detail",
@@ -1200,7 +1550,7 @@ with tab_validasi:
         id_lembar_aktif = data_siswa.get("id_lembar", "")
         gambar_aktif = st.session_state.get("gambar_siswa", {}).get(id_lembar_aktif)
 
-        col_foto, col_detail = st.columns([1, 1.25], gap="large")
+        col_foto, col_detail = st.columns([1, 1.2], gap="medium")
 
         with col_foto:
             with st.container(border=True):
@@ -1227,21 +1577,22 @@ with tab_validasi:
                     title="Tervalidasi Otomatis",
                 )
 
-            c_s1, c_s2, c_s3, c_s4 = st.columns(4)
-            c_s1.metric("Konsep (/40)", str(data_siswa["skor_konsep"]), border=True, height="stretch")
-            c_s2.metric(
-                "Langkah (/40)",
-                str(data_siswa["skor_langkah_perhitungan"]),
-                border=True,
-                height="stretch",
-            )
-            c_s3.metric(
-                "Hasil (/20)",
-                str(data_siswa["skor_hasil_dan_satuan"]),
-                border=True,
-                height="stretch",
-            )
-            c_s4.metric("Total (/100)", str(data_siswa["total_nilai"]), border=True, height="stretch")
+            # Grid skor responsif: 2×2 rapi di layar HP, 4×1 sejajar di layar desktop
+            with st.grid("auto", min_column_width=120, gap="small"):
+                st.metric("Konsep (/40)", str(data_siswa["skor_konsep"]), border=True, height="stretch")
+                st.metric(
+                    "Langkah (/40)",
+                    str(data_siswa["skor_langkah_perhitungan"]),
+                    border=True,
+                    height="stretch",
+                )
+                st.metric(
+                    "Hasil (/20)",
+                    str(data_siswa["skor_hasil_dan_satuan"]),
+                    border=True,
+                    height="stretch",
+                )
+                st.metric("Total (/100)", str(data_siswa["total_nilai"]), border=True, height="stretch")
 
             sumber_badge = "Cache lokal" if data_siswa.get("dari_cache") else "API langsung"
             prov_label = str(data_siswa.get("provider_digunakan", "-")).upper()
@@ -1254,6 +1605,74 @@ with tab_validasi:
                 f"Provider: `{prov_label}` | Model: `{data_siswa.get('model_digunakan', '-')}` | "
                 f"Sumber: **{sumber_badge}**{waktu_info}"
             )
+
+            # Edit cepat ramah layar sentuh HP (tanpa perlu geser tabel lebar)
+            with st.expander("Edit cepat nilai & umpan balik siswa ini", icon=":material/edit:"):
+                with st.form(key=f"form_edit_cepat_{id_lembar_aktif}_{indeks_terpilih}_{st.session_state['editor_version']}"):
+                    nama_baru = st.text_input("Nama Siswa", value=str(data_siswa["nama_siswa"]))
+                    c_e1, c_e2, c_e3 = st.columns(3, wrap=False)
+                    k_baru = c_e1.number_input(
+                        "Konsep",
+                        min_value=0,
+                        max_value=40,
+                        value=int(data_siswa["skor_konsep"]),
+                        step=1,
+                    )
+                    l_baru = c_e2.number_input(
+                        "Langkah",
+                        min_value=0,
+                        max_value=40,
+                        value=int(data_siswa["skor_langkah_perhitungan"]),
+                        step=1,
+                    )
+                    h_baru = c_e3.number_input(
+                        "Hasil",
+                        min_value=0,
+                        max_value=20,
+                        value=int(data_siswa["skor_hasil_dan_satuan"]),
+                        step=1,
+                    )
+                    val_baru = st.checkbox(
+                        "Tandai perlu validasi guru",
+                        value=bool(data_siswa.get("perlu_validasi_guru", False)),
+                    )
+                    fb_baru = st.text_area(
+                        "Umpan balik untuk siswa",
+                        value=str(data_siswa.get("umpan_balik_siswa", "")),
+                        height=95,
+                    )
+                    if st.form_submit_button(
+                        "Simpan Nilai Siswa Ini",
+                        icon=":material/save:",
+                        type="primary",
+                        width="stretch",
+                    ):
+                        daftar_update = list(hasil_sinkron)
+                        salinan_siswa = dict(daftar_update[indeks_terpilih])
+                        salinan_siswa.update(
+                            {
+                                "nama_siswa": nama_baru.strip() or "Tanpa Nama",
+                                "skor_konsep": int(k_baru),
+                                "skor_langkah_perhitungan": int(l_baru),
+                                "skor_hasil_dan_satuan": int(h_baru),
+                                "total_nilai": int(k_baru) + int(l_baru) + int(h_baru),
+                                "perlu_validasi_guru": bool(val_baru),
+                                "alasan_validasi": (
+                                    salinan_siswa.get("alasan_validasi", "-")
+                                    if val_baru
+                                    else "-"
+                                ),
+                                "umpan_balik_siswa": fb_baru.strip(),
+                            }
+                        )
+                        daftar_update[indeks_terpilih] = salinan_siswa
+                        st.session_state["hasil_koreksi"] = daftar_update
+                        st.session_state["editor_version"] += 1
+                        st.session_state["pesan_notifikasi_validasi"] = (
+                            f"Nilai untuk **{salinan_siswa['nama_siswa']}** disimpan "
+                            f"(Total: **{salinan_siswa['total_nilai']}**)."
+                        )
+                        st.rerun()
 
             # Jika multi-soal, tampilkan rincian penilaian per nomor soal secara rapi
             rincian_soal = data_siswa.get("rincian_per_soal") or []
@@ -1282,7 +1701,7 @@ with tab_validasi:
                 st.markdown("**Umpan balik untuk siswa**")
                 st.markdown(data_siswa.get("umpan_balik_siswa", "-"))
 
-            # Tombol Audit Ulang (Provider Aktif & Gemini 4 Neon)
+            # Tombol Audit Ulang (Provider Aktif & Gemini 4 Neon) dalam grid responsif
             daftar_soal_audit = st.session_state.get("daftar_soal_terakhir") or [
                 {
                     "nomor": 1,
@@ -1292,10 +1711,11 @@ with tab_validasi:
                 }
             ]
 
-            col_aud1, col_aud2 = st.columns(2)
-            label_audit_aktif = f"🔄 Audit Ulang ({provider_aktif.upper()})"
-            if col_aud1.button(
+            audit_grid = st.grid("auto", min_column_width=185, gap="small")
+            label_audit_aktif = f"Audit Ulang ({provider_aktif.upper()})"
+            if audit_grid.button(
                 label_audit_aktif,
+                icon=":material/refresh:",
                 key=f"btn_audit_provider_{id_lembar_aktif}_{indeks_terpilih}",
                 width="stretch",
                 disabled=gambar_aktif is None,
@@ -1342,11 +1762,13 @@ with tab_validasi:
                         )
                         st.rerun()
 
-            if col_aud2.button(
-                "🧠 Audit Ulang dengan Gemini 4 Neon (Paid Tier)",
+            if audit_grid.button(
+                "Audit Gemini Neon",
+                icon=":material/neurology:",
                 key=f"btn_audit_neon_{id_lembar_aktif}_{indeks_terpilih}",
                 width="stretch",
                 disabled=gambar_aktif is None,
+                help="Audit mendalam menggunakan Gemini 4 Neon (Paid Tier)",
             ):
                 gemini_key, _ = _ambil_api_key_efektif(
                     "GEMINI_API_KEY",
@@ -1402,7 +1824,8 @@ with tab_validasi:
             return Path(path_excel).read_bytes()
 
         st.download_button(
-            label="📥 Unduh Rekap Nilai Excel (.xlsx)",
+            label="Unduh Rekap Nilai Excel (.xlsx)",
+            icon=":material/download:",
             data=_bangun_excel_bytes,
             file_name=nama_file_download,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

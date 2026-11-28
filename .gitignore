@@ -75,3 +75,17 @@ data/lembar_jawaban/*
 !data/lembar_jawaban/.gitkeep
 data/hasil_penilaian/*
 !data/hasil_penilaian/.gitkeep
+
+# Aset pribadi & media video lomba (jaga privasi No WA, nama siswa, dan hindari file besar di GitHub)
+docs/lomba_hgn_2026/aset/identitas.txt
+docs/lomba_hgn_2026/aset/*.mp3
+docs/lomba_hgn_2026/aset/*.wav
+docs/lomba_hgn_2026/aset/*.mp4
+docs/lomba_hgn_2026/aset/*.jpg
+docs/lomba_hgn_2026/aset/*.jpeg
+docs/lomba_hgn_2026/aset/*.png
+docs/lomba_hgn_2026/aset/ttd_*
+docs/lomba_hgn_2026/aset/foto_*
+docs/lomba_hgn_2026/aset/logo_*
+docs/lomba_hgn_2026/*.mp4
+video_demo/

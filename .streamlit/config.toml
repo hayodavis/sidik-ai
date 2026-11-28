@@ -5,6 +5,15 @@ backgroundColor = "#FFFFFF"
 secondaryBackgroundColor = "#F5F7FA"
 textColor = "#1E293B"
 font = "sans serif"
+baseRadius = "10px"
+buttonRadius = "10px"
+paddingTop = "1.25rem"
+paddingBottom = "2rem"
+metricValueFontSize = "1.75rem"
+
+[theme.sidebar]
+paddingTop = "0.75rem"
+paddingBottom = "1.5rem"
 
 [server]
 headless = true

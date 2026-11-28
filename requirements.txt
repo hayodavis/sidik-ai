@@ -8,3 +8,4 @@ openpyxl
 pydantic
 python-dotenv
 httpx
+opencv-python-headless
